@@ -33,7 +33,8 @@ const HostListPayload = packed struct {
 };
 
 const State = struct {
-    /// lobbies, with host as key
+    /// lobbies, id as key, member as value. member at position 0 is the host
+    /// the Key and Value in this hashmap are both on the heap! remember to clean them up when popping
     lobbies: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(lib.network.EndPoint)),
 
     /// if the server should stop

@@ -4,6 +4,8 @@
 const std = @import("std");
 const testing = std.testing;
 
+const CRC32 = std.hash.crc.Crc32Cksum;
+
 pub const network = @import("network");
 
 pub const PacketError = error{ DeserializationError, AuthorizationError, BadInput, OutOfMemory };
@@ -150,8 +152,6 @@ pub fn Client(comptime T: type) type {
             const socket = self.socket;
             const BUFF_SIZE = 1024;
 
-            try self.socket.setReadTimeout(100);
-
             var buff: [BUFF_SIZE]u8 = undefined;
 
             const from = try socket.receiveFrom(&buff);
@@ -160,6 +160,105 @@ pub fn Client(comptime T: type) type {
             try self.handle_packet_cb(self, buff[0..from.numberOfBytes], from.sender);
         }
     };
+}
+
+pub const PacketConfig = struct {
+    T: type,
+    magic_bytes: u32 = 0xDEADBEEF,
+};
+
+pub fn PacketHeader(config: PacketConfig) type {
+    return packed struct {
+        magic: u32,
+        header_size: u16,
+        payload_size: u32,
+        packet_type: config.T,
+        checksum: u32,
+
+        const Self = @This();
+
+        pub fn init(packet_type: config.T, payload_size: u32, checksum: u32) !Self {
+            return .{
+                .magic = config.magic_bytes,
+                .header_size = @sizeOf(Self),
+                .payload_size = payload_size,
+                .packet_type = packet_type,
+                .checksum = checksum,
+            };
+        }
+    };
+}
+
+pub fn DefaultPacket(T: type) type {
+    return Packet(.{ .T = T });
+}
+
+pub fn Packet(config: PacketConfig) type {
+    const PacketHeaderType = PacketHeader(config);
+    return struct {
+        header: PacketHeaderType,
+        payload: []const u8,
+
+        const Self = @This();
+
+        pub fn init(packet_type: config.T, payload: []const u8) !Self {
+            const hash = CRC32.hash(payload);
+            return .{
+                .header = try PacketHeaderType.init(packet_type, @intCast(payload.len), hash),
+                .payload = payload,
+            };
+        }
+
+        /// caller is responsible for freeing after this is called
+        pub fn serialize(self: *const Self, allocator: std.mem.Allocator) ![]const u8 {
+            const buffer = try allocator.alloc(u8, (self.header.header_size + self.header.payload_size) / @sizeOf(u8));
+            var stream = std.io.fixedBufferStream(buffer);
+
+            const writer = stream.writer();
+
+            try writer.writeStruct(self.header);
+            try writer.writeAll(self.payload);
+            return stream.getWritten();
+        }
+
+        /// caller is responsible for freeing after this is called
+        pub fn deserialize(data: []const u8, allocator: std.mem.Allocator) !Self {
+            var stream = std.io.fixedBufferStream(data);
+            const reader = stream.reader();
+
+            const header = try reader.readStruct(PacketHeaderType);
+
+            const payload = try allocator.alloc(u8, header.payload_size);
+            try reader.readNoEof(payload);
+
+            if (header.checksum != CRC32.hash(payload)) return error.InvalidChecksum;
+
+            return .{
+                .header = header,
+                .payload = payload,
+            };
+        }
+
+        pub fn free(self: *Self, allocator: std.mem.Allocator) void {
+            allocator.free(self.payload);
+        }
+    };
+}
+
+test "packet serialization and deserialization" {
+    const TestPacket = DefaultPacket(enum(u32) { host, join });
+
+    const allocator = std.testing.allocator;
+    const ack_packet = try TestPacket.init(.host, "hello, world!");
+
+    const data = try ack_packet.serialize(allocator);
+    defer allocator.free(data);
+
+    var des_packet = try TestPacket.deserialize(data, allocator);
+    defer des_packet.free(allocator);
+
+    try std.testing.expectEqual(des_packet.header, ack_packet.header);
+    try std.testing.expectEqualStrings(des_packet.payload, ack_packet.payload);
 }
 
 const TestContext = struct {};

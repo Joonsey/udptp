@@ -55,6 +55,10 @@ pub fn Server(comptime T: type) type {
             };
         }
 
+        pub fn broadcast(self: Self, clients: []network.EndPoint, data: []const u8) void {
+            for (clients) |client| self.send_to(client, data);
+        }
+
         pub fn set_read_timeout(self: *Self, timeout: u32) void {
             self.socket.setReadTimeout(timeout) catch unreachable;
         }
@@ -82,7 +86,7 @@ pub fn Server(comptime T: type) type {
             try self.clients.put(self.allocator, from.sender, std.time.microTimestamp());
         }
 
-        pub fn send_to(self: *Self, to: network.EndPoint, data: []const u8) void {
+        pub fn send_to(self: Self, to: network.EndPoint, data: []const u8) void {
             _ = self.socket.sendTo(to, data) catch unreachable;
         }
 

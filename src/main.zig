@@ -17,6 +17,10 @@ const PacketType = enum(u32) {
 
 const Packet = lib.Packet(.{ .T = PacketType });
 
+const CloseReason = enum(u16) {
+    HOST_QUIT,
+};
+
 const HostListPayload = packed struct {
     static_names_id: u32,
     ip_1: u8,
@@ -83,10 +87,15 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
             }
         },
         .close => {
-            const lobby_exist = self.ctx.lobbies.fetchRemove(packet.payload);
-            if (lobby_exist) |lobby| {
+            var lobby_exist = self.ctx.lobbies.fetchRemove(packet.payload);
+            if (lobby_exist) |*lobby| {
                 std.log.info("{s} is closing", .{lobby.key});
-                // TODO: broadcast to lobby members
+                const out_packet = try Packet.init(.close, std.enums.tagName(CloseReason, .HOST_QUIT).?);
+                const out_data = out_packet.serialize(self.allocator) catch return error.BadInput;
+                self.broadcast(lobby.value.items, out_data);
+                self.allocator.free(out_data);
+                self.allocator.free(lobby.key);
+                lobby.value.deinit(self.allocator);
             }
         },
         .req_host_list => {
@@ -107,6 +116,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                 }) catch return error.BadInput;
                 n += 1;
             }
+
             const payload = stream.getWritten();
 
             const sender_packet = try Packet.init(.ret_host_list, payload);
@@ -306,6 +316,12 @@ test "get host list" {
     try std.testing.expectEqual(ctx.available_lobbies.items[0].ip_4, lobby.items[0].address.ipv4.value[3]);
 }
 
+fn _listen_wrapper1(server_ptr: *lib.Server(State)) !void {
+    while (!server_ptr.ctx.should_stop) {
+        _ = try server_ptr.listen();
+    }
+}
+
 fn _listen_wrapper2(server_ptr: *lib.Server(State)) !void {
     while (server_ptr.clients.size < 4) {
         _ = try server_ptr.listen();
@@ -387,7 +403,9 @@ test "get host list plural users" {
 
     var state = State.init(allocator);
     var server = try lib.Server(State).init(2800, allocator, &state);
+    var ctx: MoreTestContext = .{ .available_lobbies = .{} };
 
+    defer ctx.available_lobbies.deinit(allocator);
     defer server.deinit();
     defer state.deinit();
 
@@ -397,9 +415,6 @@ test "get host list plural users" {
 
     const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper2, .{&server});
     const ack_packet = try Packet.init(.host, "host/world");
-
-    var ctx: MoreTestContext = .{ .available_lobbies = .{} };
-    defer ctx.available_lobbies.deinit(allocator);
 
     var client = try lib.Client(MoreTestContext).init(allocator, &ctx);
     const data = try ack_packet.serialize(allocator);
@@ -432,4 +447,56 @@ test "get host list plural users" {
     try std.testing.expectEqual(ctx.available_lobbies.items.len, 1);
     try std.testing.expectEqual(ctx.available_lobbies.items[0].users, 3);
     try std.testing.expectEqual(ctx.available_lobbies.items[0].capacity, 4);
+}
+
+test "close packet" {
+    const allocator = std.testing.allocator;
+
+    var state = State.init(allocator);
+    var server = try lib.Server(State).init(2800, allocator, &state);
+    var ctx: MoreTestContext = .{ .available_lobbies = .{} };
+
+    defer ctx.available_lobbies.deinit(allocator);
+    defer server.deinit();
+    defer state.deinit();
+
+    server.handle_packet_cb = handle_packet;
+
+    server.set_read_timeout(1000);
+
+    const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper2, .{&server});
+    const ack_packet = try Packet.init(.host, "host/world");
+
+    var client = try lib.Client(MoreTestContext).init(allocator, &ctx);
+    const data = try ack_packet.serialize(allocator);
+    try client.connect("127.0.0.1", 2800, data);
+    allocator.free(data);
+
+    const ack_packet2 = try Packet.init(.join, "host/world");
+    const ack_data = try ack_packet2.serialize(allocator);
+
+    const close_packet = try Packet.init(.close, "host/world");
+    const close_data = try close_packet.serialize(allocator);
+    defer allocator.free(close_data);
+
+    var client2 = try lib.Client(MoreTestContext).init(allocator, &ctx);
+    try client2.connect("127.0.0.1", 2800, ack_data);
+
+    var client3 = try lib.Client(MoreTestContext).init(allocator, &ctx);
+    try client3.connect("127.0.0.1", 2800, ack_data);
+
+    allocator.free(ack_data);
+    client.send(close_data);
+
+    const req_packet = try Packet.init(.join, "");
+    const req_data = try req_packet.serialize(allocator);
+
+    var client4 = try lib.Client(MoreTestContext).init(allocator, &ctx);
+    client4.handle_packet_cb = sample_client_handle_packet_cb;
+    try client4.connect("127.0.0.1", 2800, req_data);
+    allocator.free(req_data);
+
+    thread.join();
+
+    try std.testing.expectEqual(state.lobbies.size, 0);
 }

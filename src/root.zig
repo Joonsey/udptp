@@ -227,8 +227,10 @@ pub fn Packet(config: PacketConfig) type {
             const reader = stream.reader();
 
             const header = try reader.readStruct(PacketHeaderType);
+            if (header.magic != config.magic_bytes) return error.InvalidMagicBytes;
 
             const payload = try allocator.alloc(u8, header.payload_size);
+            errdefer allocator.free(payload);
             try reader.readNoEof(payload);
 
             if (header.checksum != CRC32.hash(payload)) return error.InvalidChecksum;
@@ -259,6 +261,21 @@ test "packet serialization and deserialization" {
 
     try std.testing.expectEqual(des_packet.header, ack_packet.header);
     try std.testing.expectEqualStrings(des_packet.payload, ack_packet.payload);
+}
+
+test "packet invalid magic bytes" {
+    const TestPacket = DefaultPacket(enum(u32) { host, join });
+    const TestPacketDiffBytes = Packet(.{ .T = enum(u32) { host, join }, .magic_bytes = 0xC0DEFACE });
+
+    const allocator = std.testing.allocator;
+    const ack_packet = try TestPacket.init(.host, "hello, world!");
+
+    const data = try ack_packet.serialize(allocator);
+    defer allocator.free(data);
+
+    const err = TestPacketDiffBytes.deserialize(data, allocator);
+
+    try std.testing.expectError(error.InvalidMagicBytes, err);
 }
 
 const TestContext = struct {};

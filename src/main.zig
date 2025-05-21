@@ -102,28 +102,35 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
     defer packet.free(self.allocator);
 
     // used for sending packet
-    var buffer: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
+    //var buffer: [1024]u8 = undefined;
+    //const stream = std.io.fixedBufferStream(&buffer);
 
     switch (packet.header.packet_type) {
         .host => {
-            var _stream = std.io.fixedBufferStream(packet.payload);
-            const reader = _stream.reader();
-            const join_payload = reader.readStructEndian(HostPayload, .big) catch return error.BadInput;
+            const join_payload = lib.deserialize_payload(packet.payload, HostPayload) catch return error.BadInput;
 
             const dupe_scope = try self.allocator.dupe(u8, join_payload.scope[0..join_payload.scope.len]);
             const dupe_key = try self.allocator.dupe(u8, join_payload.key[0..join_payload.key.len]);
+            errdefer self.allocator.free(dupe_scope);
+            errdefer self.allocator.free(dupe_key);
 
+            // need to study the memory implications here. Too tired to do it now.
+            // this is memory safe according to all test cases
+            // but this took a fair bit of work.
             const scope_exist = self.ctx.scopes.getPtr(dupe_scope);
             if (scope_exist) |scope| {
-                const lobby_exist: ?*Lobby = scope.lobbies.getPtr(dupe_key);
+                const lobby_exist = scope.lobbies.getPtr(dupe_key);
                 if (lobby_exist) |_| {
+                    self.allocator.free(dupe_scope);
+                    self.allocator.free(dupe_key);
                     return;
                 }
 
                 var lobby: Lobby = .{};
                 try lobby.members.append(self.allocator, sender);
+                errdefer self.allocator.free(dupe_key);
                 try scope.lobbies.put(self.allocator, dupe_key, lobby);
+                self.allocator.free(dupe_scope);
 
                 std.log.info("{any} new host {s}:{s}", .{ sender, dupe_scope, dupe_key });
             } else {
@@ -131,30 +138,27 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                 var lobby: Lobby = .{};
                 try lobby.members.append(self.allocator, sender);
                 try scope.lobbies.put(self.allocator, dupe_key, lobby);
-
                 try self.ctx.scopes.put(self.allocator, dupe_scope, scope);
 
                 std.log.info("{any} new host {s}:{s}", .{ sender, dupe_scope, dupe_key });
             }
         },
         .join => {
-            const reader = stream.reader();
-            const join_payload = reader.readStructEndian(JoinPayload, .big) catch return error.BadInput;
+            const join_payload = lib.deserialize_payload(packet.payload, JoinPayload) catch return error.BadInput;
 
-            const dupe_scope = try self.allocator.dupeZ(u8, join_payload.scope[0..join_payload.scope.len]);
-            const dupe_key = try self.allocator.dupeZ(u8, join_payload.key[0..join_payload.key.len]);
+            const dupe_scope = join_payload.scope[0..join_payload.scope.len];
+            const dupe_key = join_payload.key[0..join_payload.key.len];
+
+            std.log.info("{any} joined lobby {s}:{s}", .{ sender, dupe_scope, dupe_key });
 
             const scope_exist = self.ctx.scopes.getPtr(dupe_scope);
             if (scope_exist) |scope| {
                 const lobby_exist: ?*Lobby = scope.lobbies.getPtr(dupe_key);
                 if (lobby_exist) |lobby| {
-                    std.log.info("{any} new host {s}:{s}", .{ sender, dupe_scope, dupe_key });
+                    std.log.info("{any} joined lobby {s}:{s}", .{ sender, dupe_scope, dupe_key });
                     try lobby.members.append(self.allocator, sender);
                 }
             }
-
-            self.allocator.free(dupe_scope);
-            self.allocator.free(dupe_key);
         },
         .close => {
             // TODO
@@ -211,7 +215,7 @@ pub fn main() !void {
     }
 }
 
-test "simple connection test" {
+test "simple connection" {
     const allocator = std.testing.allocator;
 
     var state = State.init(allocator);
@@ -238,7 +242,7 @@ test "simple connection test" {
     thread.join();
 
     try std.testing.expect(client.target != null);
-    try std.testing.expectEqual(server.clients.size, 1);
+    try std.testing.expectEqual(1, server.clients.size);
 
     const found_scope = state.scopes.get(&init_array32("world"));
     if (found_scope) |scope| {
@@ -248,8 +252,163 @@ test "simple connection test" {
     }
 }
 
+test "join lobby" {
+    const allocator = std.testing.allocator;
+
+    var state = State.init(allocator);
+    var server = try lib.Server(State).init(2800, allocator, &state);
+    defer server.deinit();
+    defer state.deinit();
+    var buffer: [512]u8 = undefined;
+    server.handle_packet_cb = handle_packet;
+    server.set_read_timeout(200);
+
+    const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper, .{&server});
+
+    const TestContext = struct {};
+    var ctx: TestContext = .{};
+    var client = try lib.Client(TestContext).init(allocator, &ctx);
+
+    const host_payload: HostPayload = .{ .key = init_array32("hello"), .scope = init_array32("world") };
+    const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, host_payload));
+    const host_data = try host_packet.serialize(allocator);
+    try client.connect("127.0.0.1", 2800, host_data);
+    client.send(host_data);
+    defer allocator.free(host_data);
+
+    var join_client = try lib.Client(TestContext).init(allocator, &ctx);
+    const join_payload: JoinPayload = .{ .key = init_array32("hello"), .scope = init_array32("world") };
+    const join_packet = try Packet.init(.join, try lib.serialize_payload(&buffer, join_payload));
+    const join_data = try join_packet.serialize(allocator);
+    try join_client.connect("127.0.0.1", 2800, join_data);
+    defer allocator.free(join_data);
+
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+    state.should_stop = true;
+    thread.join();
+
+    try std.testing.expect(client.target != null);
+    try std.testing.expectEqual(2, server.clients.size);
+
+    const scope = state.scopes.get(&init_array32("world")).?;
+    const lobby: Lobby = scope.lobbies.get(&init_array32("hello")).?;
+
+    try std.testing.expectEqual(2, lobby.members.items.len);
+}
+
+test "join lobby multiple scopes" {
+    const allocator = std.testing.allocator;
+
+    var state = State.init(allocator);
+    var server = try lib.Server(State).init(2800, allocator, &state);
+    defer server.deinit();
+    defer state.deinit();
+    server.handle_packet_cb = handle_packet;
+    server.set_read_timeout(200);
+
+    const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper, .{&server});
+
+    const scopes = [_][]const u8{ "new", "world" };
+    inline for (scopes) |scope| {
+        const TestContext = struct {};
+        var ctx: TestContext = .{};
+        var client = try lib.Client(TestContext).init(allocator, &ctx);
+        var buffer: [512]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+
+        const host_payload: HostPayload = .{ .key = init_array32("hello"), .scope = init_array32(scope) };
+        try stream.writer().writeStructEndian(host_payload, .big);
+        const host_packet = try Packet.init(.host, stream.getWritten());
+        const host_data = try host_packet.serialize(allocator);
+        try client.connect("127.0.0.1", 2800, host_data);
+        client.send(host_data);
+        defer allocator.free(host_data);
+
+        buffer = undefined;
+        stream = std.io.fixedBufferStream(&buffer);
+        stream.reset();
+        var join_client = try lib.Client(TestContext).init(allocator, &ctx);
+        const join_payload: JoinPayload = .{ .key = init_array32("hello"), .scope = init_array32(scope) };
+        try stream.writer().writeStructEndian(join_payload, .big);
+        const join_packet = try Packet.init(.join, stream.getWritten());
+        const join_data = try join_packet.serialize(allocator);
+        try join_client.connect("127.0.0.1", 2800, join_data);
+        defer allocator.free(join_data);
+    }
+
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+    state.should_stop = true;
+    thread.join();
+
+    try std.testing.expectEqual(4, server.clients.size);
+
+    inline for (scopes) |scope_name| {
+        const scope = state.scopes.get(&init_array32(scope_name)).?;
+        const lobby: Lobby = scope.lobbies.get(&init_array32("hello")).?;
+
+        try std.testing.expectEqual(2, lobby.members.items.len);
+    }
+}
+
+test "join lobby multiple lobbies" {
+    const allocator = std.testing.allocator;
+
+    var state = State.init(allocator);
+    var server = try lib.Server(State).init(2800, allocator, &state);
+    defer server.deinit();
+    defer state.deinit();
+    server.handle_packet_cb = handle_packet;
+    server.set_read_timeout(200);
+
+    const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper, .{&server});
+
+    const lobbies = [_][]const u8{ "new", "world" };
+    inline for (lobbies) |lobby| {
+        const TestContext = struct {};
+        var ctx: TestContext = .{};
+        var client = try lib.Client(TestContext).init(allocator, &ctx);
+        var buffer: [512]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buffer);
+
+        const host_payload: HostPayload = .{ .key = init_array32(lobby), .scope = init_array32("world") };
+        try stream.writer().writeStructEndian(host_payload, .big);
+        const host_packet = try Packet.init(.host, stream.getWritten());
+        const host_data = try host_packet.serialize(allocator);
+        try client.connect("127.0.0.1", 2800, host_data);
+        client.send(host_data);
+        defer allocator.free(host_data);
+
+        buffer = undefined;
+        stream = std.io.fixedBufferStream(&buffer);
+        stream.reset();
+        var join_client = try lib.Client(TestContext).init(allocator, &ctx);
+        const join_payload: JoinPayload = .{ .key = init_array32(lobby), .scope = init_array32("world") };
+        try stream.writer().writeStructEndian(join_payload, .big);
+        const join_packet = try Packet.init(.join, stream.getWritten());
+        const join_data = try join_packet.serialize(allocator);
+        try join_client.connect("127.0.0.1", 2800, join_data);
+        defer allocator.free(join_data);
+    }
+
+    std.Thread.sleep(50 * std.time.ns_per_ms);
+    state.should_stop = true;
+    thread.join();
+
+    try std.testing.expectEqual(4, server.clients.size);
+
+    inline for (lobbies) |lobby_name| {
+        const scope = state.scopes.get(&init_array32("world")).?;
+        const lobby: Lobby = scope.lobbies.get(&init_array32(lobby_name)).?;
+
+        try std.testing.expectEqual(2, lobby.members.items.len);
+    }
+}
+
 fn _listen_wrapper(server_ptr: *lib.Server(State)) !void {
-    while (server_ptr.clients.size < 2) {
-        _ = try server_ptr.listen();
+    while (!server_ptr.ctx.should_stop) {
+        _ = server_ptr.listen() catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
     }
 }

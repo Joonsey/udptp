@@ -251,6 +251,22 @@ pub fn Packet(config: PacketConfig) type {
     };
 }
 
+/// returned slice's lifetime will be as long as buffer argument
+pub fn serialize_payload(buffer: []u8, payload: anytype) ![]u8 {
+    @memset(buffer, 0);
+    var stream = std.io.fixedBufferStream(buffer);
+
+    try stream.writer().writeStructEndian(payload, .big);
+
+    return stream.getWritten();
+}
+
+pub fn deserialize_payload(payload: []const u8, comptime T: type) !T {
+    var stream = std.io.fixedBufferStream(payload);
+
+    return try stream.reader().readStructEndian(T, .big);
+}
+
 test "packet serialization and deserialization" {
     const TestPacket = DefaultPacket(enum(u32) { host, join });
 

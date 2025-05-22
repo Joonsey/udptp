@@ -60,7 +60,10 @@ pub const ReviewResponsePayload = extern struct {
     join_request: JoinRequestPayload,
 };
 
-pub const HostPayload = JoinPayload;
+pub const HostPayload = extern struct {
+    q: JoinPayload,
+    policy: JoinPolicy = .AutoAccept,
+};
 pub const ClosePayload = extern struct {
     q: JoinPayload,
     reason: CloseReason,

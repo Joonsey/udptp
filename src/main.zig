@@ -80,10 +80,10 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
 
     switch (packet.header.packet_type) {
         .host => {
-            const join_payload = lib.deserialize_payload(packet.payload, HostPayload) catch return error.BadInput;
+            const host_payload = lib.deserialize_payload(packet.payload, HostPayload) catch return error.BadInput;
 
-            const dupe_scope = try self.allocator.dupe(u8, join_payload.scope[0..join_payload.scope.len]);
-            const dupe_key = try self.allocator.dupe(u8, join_payload.key[0..join_payload.key.len]);
+            const dupe_scope = try self.allocator.dupe(u8, host_payload.q.scope[0..host_payload.q.scope.len]);
+            const dupe_key = try self.allocator.dupe(u8, host_payload.q.key[0..host_payload.q.key.len]);
             errdefer self.allocator.free(dupe_scope);
             errdefer self.allocator.free(dupe_key);
 
@@ -101,7 +101,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                     return;
                 }
 
-                var lobby: Lobby = .{};
+                var lobby: Lobby = .{ .join_policy = host_payload.policy };
                 try lobby.members.append(self.allocator, sender);
                 errdefer self.allocator.free(dupe_key);
                 try scope.lobbies.put(self.allocator, dupe_key, lobby);
@@ -110,7 +110,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                 std.log.info("{any} new host {s}:{s}", .{ sender, dupe_scope, dupe_key });
             } else {
                 var scope: Scope = .{};
-                var lobby: Lobby = .{};
+                var lobby: Lobby = .{ .join_policy = host_payload.policy };
                 try lobby.members.append(self.allocator, sender);
                 try scope.lobbies.put(self.allocator, dupe_key, lobby);
                 try self.ctx.scopes.put(self.allocator, dupe_scope, scope);
@@ -284,7 +284,7 @@ test "simple connection" {
     var ctx: TestContext = .{};
     var client = try lib.Client(TestContext).init(allocator, &ctx);
 
-    const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
+    const host_payload: HostPayload = .{ .q = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) } };
     try stream.writer().writeStructEndian(host_payload, .big);
     const ack_packet = try Packet.init(.host, stream.getWritten());
     const data = try ack_packet.serialize(allocator);
@@ -321,7 +321,7 @@ test "join lobby" {
     var ctx: TestContext = .{};
     var client = try lib.Client(TestContext).init(allocator, &ctx);
 
-    const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
+    const host_payload: HostPayload = .{ .q = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) } };
     const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, host_payload));
     const host_data = try host_packet.serialize(allocator);
     try client.connect("127.0.0.1", 2800, host_data);
@@ -368,7 +368,7 @@ test "join lobby multiple scopes" {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
 
-        const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed(scope, 32) };
+        const host_payload: HostPayload = .{ .q = .{ .key = to_fixed("hello", 32), .scope = to_fixed(scope, 32) } };
         try stream.writer().writeStructEndian(host_payload, .big);
         const host_packet = try Packet.init(.host, stream.getWritten());
         const host_data = try host_packet.serialize(allocator);
@@ -422,7 +422,7 @@ test "join lobby multiple lobbies" {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
 
-        const host_payload: HostPayload = .{ .key = to_fixed(lobby, 32), .scope = to_fixed("world", 32) };
+        const host_payload: HostPayload = .{ .q = .{ .key = to_fixed(lobby, 32), .scope = to_fixed("world", 32) } };
         try stream.writer().writeStructEndian(host_payload, .big);
         const host_packet = try Packet.init(.host, stream.getWritten());
         const host_data = try host_packet.serialize(allocator);
@@ -474,7 +474,7 @@ test "close lobby" {
 
     const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper, .{&server});
 
-    const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
+    const host_payload: HostPayload = .{ .q = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) } };
     const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, host_payload));
     const host_data = try host_packet.serialize(allocator);
     try host_client.connect("127.0.0.1", 2800, host_data);
@@ -527,7 +527,7 @@ test "request lobby list" {
     const lobbies = [_][]const u8{ "orange", "purple", "yellow", "blueberry", "potatoes" };
     inline for (lobbies) |lobby| {
         var host_client = try lib.Client(TestContext).init(allocator, &ctx);
-        const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, HostPayload{ .key = to_fixed(lobby, 32), .scope = to_fixed("test_123", 32) }));
+        const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, HostPayload{ .q = .{ .key = to_fixed(lobby, 32), .scope = to_fixed("test_123", 32) } }));
         const host_data = try host_packet.serialize(allocator);
         try host_client.connect("127.0.0.1", 2800, host_data);
         allocator.free(host_data);

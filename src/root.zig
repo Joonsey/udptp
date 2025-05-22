@@ -245,7 +245,7 @@ pub fn Packet(config: PacketConfig) type {
             };
         }
 
-        pub fn free(self: *Self, allocator: std.mem.Allocator) void {
+        pub fn free(self: Self, allocator: std.mem.Allocator) void {
             allocator.free(self.payload);
         }
     };

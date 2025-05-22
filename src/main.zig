@@ -133,8 +133,11 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                             std.log.info("{any} joined lobby {s}:{s} (via auto-accept)", .{ sender, dupe_scope, dupe_key });
 
                             try lobby.members.append(self.allocator, sender);
-                            const payload = lib.serialize_payload(&buffer, join_payload) catch return error.BadInput;
-                            const sender_packet = try Packet.init(.join, payload);
+                            const payload = lib.serialize_payload(
+                                &buffer,
+                                ReviewResponsePayload{ .join_request = .{ .ip = sender.address.ipv4.value, .port = sender.port }, .q = join_payload, .result = .Accepted },
+                            ) catch return error.BadInput;
+                            const sender_packet = try Packet.init(.review_request, payload);
                             const sender_data = sender_packet.serialize(self.allocator) catch return error.BadInput;
                             self.send_to(lobby.members.items[lobby.host_idx], sender_data);
                             self.allocator.free(sender_data);

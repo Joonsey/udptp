@@ -8,7 +8,7 @@ const CRC32 = std.hash.crc.Crc32Cksum;
 
 pub const network = @import("network");
 
-pub const PacketError = error{ DeserializationError, AuthorizationError, BadInput, OutOfMemory };
+pub const PacketError = error{ DeserializationError, AuthorizationError, BadInput, OutOfMemory, InvalidMagicBytes, InvalidChecksum, EndOfStream };
 
 pub fn Server(comptime T: type) type {
     return struct {

@@ -216,6 +216,7 @@ pub fn Packet(config: PacketConfig) type {
         /// caller is responsible for freeing after this is called
         pub fn serialize(self: *const Self, allocator: std.mem.Allocator) ![]const u8 {
             const buffer = try allocator.alloc(u8, (self.header.header_size + self.header.payload_size) / @sizeOf(u8));
+            errdefer allocator.free(buffer);
             var stream = std.io.fixedBufferStream(buffer);
 
             const writer = stream.writer();

@@ -11,6 +11,10 @@ pub const PacketType = enum(u32) {
     close,
     req_host_list,
     ret_host_list,
+
+    //inter-client specific types
+    ack,
+    message,
 };
 
 pub const Packet = lib.Packet(.{ .T = PacketType });

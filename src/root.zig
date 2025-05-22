@@ -8,7 +8,7 @@ const CRC32 = std.hash.crc.Crc32Cksum;
 
 pub const network = @import("network");
 
-pub const PacketError = error{ DeserializationError, AuthorizationError, BadInput, OutOfMemory, InvalidMagicBytes, InvalidChecksum, EndOfStream };
+pub const PacketError = error{ DeserializationError, AuthorizationError, BadInput, OutOfMemory, InvalidMagicBytes, InvalidChecksum, EndOfStream, NoSpaceLeft };
 
 pub fn Server(comptime T: type) type {
     return struct {
@@ -44,7 +44,7 @@ pub fn Server(comptime T: type) type {
 
         pub fn init(port: u16, allocator: std.mem.Allocator, ctx: *T) !Self {
             var socket = try network.Socket.create(.ipv4, .udp);
-            try socket.bind(.{ .address = .{ .ipv4 = network.Address.IPv4.loopback }, .port = port });
+            try socket.bind(.{ .address = .{ .ipv4 = network.Address.IPv4.any }, .port = port });
 
             return .{
                 .socket = socket,

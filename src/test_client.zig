@@ -4,6 +4,7 @@
 const std = @import("std");
 const lib = @import("udptp_lib");
 const shared = @import("shared.zig");
+const builtin = @import("builtin");
 
 const JoinPolicy = shared.JoinPolicy;
 const PacketType = shared.PacketType;
@@ -93,14 +94,18 @@ fn handle_packet(self: *Client, data: []const u8, sender: lib.network.EndPoint) 
         },
         .ack => {
             self.target = sender;
-            self.ctx.state = .PeerToPeerEstablished;
-            std.log.info("connected through peer-to-peer with {d}.{d}.{d}.{d}:{d}", .{
-                sender.address.ipv4.value[0],
-                sender.address.ipv4.value[1],
-                sender.address.ipv4.value[2],
-                sender.address.ipv4.value[3],
-                sender.port,
-            });
+            if (self.ctx.state != .PeerToPeerEstablished) {
+                // We send one additional round-trip as the first packet is presumed to be lost to punching a hole in the NAT
+                self.ctx.state = .PeerToPeerEstablished;
+                std.log.info("connected through peer-to-peer with {d}.{d}.{d}.{d}:{d}", .{
+                    sender.address.ipv4.value[0],
+                    sender.address.ipv4.value[1],
+                    sender.address.ipv4.value[2],
+                    sender.address.ipv4.value[3],
+                    sender.port,
+                });
+                self.send(data);
+            }
         },
         .message => {
             std.log.info("{d}.{d}.{d}.{d}:{d}: {s}", .{
@@ -135,12 +140,15 @@ fn handle_stdin(self: *Client) void {
     var buffer: [2048]u8 = undefined;
     const reader = stdin.reader();
     const stdin_buffer = reader.readUntilDelimiterOrEof(&buffer, '\n') catch unreachable;
-    const data = stdin_buffer orelse "Q";
+    const data_pre_prune = stdin_buffer orelse "Q";
+    // we need to prune the random '\r' character on windows stdio
+    const data = if (builtin.os.tag == .windows) data_pre_prune[0 .. data_pre_prune.len - 1] else data_pre_prune;
 
     switch (self.ctx.state) {
         .Mediating => {
             const separator = std.mem.indexOfScalar(u8, data, ' ') orelse data.len;
             const pruned_argument = if (separator == data.len) data[separator..] else data[separator + 1 ..];
+
             if (std.meta.stringToEnum(Commands, data[0..separator])) |cmd| handle_command(self, cmd, pruned_argument) catch unreachable;
         },
         .PeerToPeerEstablished => {

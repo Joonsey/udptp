@@ -4,63 +4,27 @@
 
 const std = @import("std");
 const lib = @import("udptp_lib");
+const shared = @import("shared.zig");
 
-const PORT = 3306;
+const JoinPolicy = shared.JoinPolicy;
+const PacketType = shared.PacketType;
+const CloseReason = shared.CloseReason;
 
-const PacketType = enum(u32) {
-    host,
-    join,
-    close,
-    req_host_list,
-    ret_host_list,
-};
+const Packet = shared.Packet;
+const HostPayload = shared.HostPayload;
+const JoinPayload = shared.JoinPayload;
+const ReviewResponsePayload = shared.ReviewResponsePayload;
+const ClosePayload = shared.ClosePayload;
+const RequestHostListPayload = shared.RequestHostListPayload;
+const HostListPayload = shared.HostListPayload;
 
-const Packet = lib.Packet(.{ .T = PacketType });
-
-const CloseReason = enum(u16) {
-    HOST_QUIT,
-};
-
-fn to_fixed(str: []const u8, comptime arr_len: usize) [arr_len]u8 {
-    std.debug.assert(str.len <= arr_len);
-    var buf: [arr_len]u8 = std.mem.zeroes([arr_len]u8);
-    @memcpy(buf[0..str.len], str);
-    return buf;
-}
-
-test "static string converter" {
-    const str = "hello, world!";
-    const static_str = to_fixed(str, 15);
-
-    try std.testing.expectEqualSlices(u8, str, static_str[0..str.len]);
-    try std.testing.expectEqualStrings(str, static_str[0..str.len]);
-}
-
-const JoinPayload = extern struct {
-    scope: [32]u8,
-    key: [32]u8,
-};
-
-const HostPayload = JoinPayload;
-const ClosePayload = extern struct {
-    q: JoinPayload,
-    reason: CloseReason,
-};
-const RequestHostListPayload = extern struct {
-    scope: [32]u8,
-};
-
-const HostListPayload = extern struct {
-    name: [32]u8,
-    ip: [4]u8,
-    port: u16,
-    users: u16,
-    capacity: u16,
-};
+const PORT = shared.PORT;
+const to_fixed = shared.to_fixed;
 
 const Lobby = struct {
     host_idx: usize = 0,
     members: std.ArrayListUnmanaged(lib.network.EndPoint) = .{},
+    join_policy: JoinPolicy = .AutoAccept,
 
     fn deinit(self: *Lobby, allocator: std.mem.Allocator) void {
         self.members.deinit(allocator);
@@ -130,6 +94,8 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
             if (scope_exist) |scope| {
                 const lobby_exist = scope.lobbies.getPtr(dupe_key);
                 if (lobby_exist) |_| {
+                    std.log.warn("lobby attempted to start with existing key / scope combination '{s}:{s}'", .{ dupe_scope, dupe_key });
+
                     self.allocator.free(dupe_scope);
                     self.allocator.free(dupe_key);
                     return;
@@ -162,9 +128,54 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
             if (scope_exist) |scope| {
                 const lobby_exist: ?*Lobby = scope.lobbies.getPtr(dupe_key);
                 if (lobby_exist) |lobby| {
-                    std.log.info("{any} joined lobby {s}:{s}", .{ sender, dupe_scope, dupe_key });
-                    try lobby.members.append(self.allocator, sender);
+                    switch (lobby.join_policy) {
+                        .AutoAccept => {
+                            std.log.info("{any} joined lobby {s}:{s} (via auto-accept)", .{ sender, dupe_scope, dupe_key });
+
+                            try lobby.members.append(self.allocator, sender);
+                            const payload = lib.serialize_payload(&buffer, join_payload) catch return error.BadInput;
+                            const sender_packet = try Packet.init(.join, payload);
+                            const sender_data = sender_packet.serialize(self.allocator) catch return error.BadInput;
+                            self.send_to(lobby.members.items[lobby.host_idx], sender_data);
+                            self.allocator.free(sender_data);
+                        },
+                        .Reject => std.log.info("{any} got rejected from lobby {s}:{s}", .{ sender, dupe_scope, dupe_key }),
+                        .ManualReview => {
+                            const payload = lib.serialize_payload(
+                                &buffer,
+                                ReviewResponsePayload{ .join_request = .{ .ip = sender.address.ipv4.value, .port = sender.port }, .q = join_payload, .result = .Pending },
+                            ) catch return error.BadInput;
+                            const sender_packet = try Packet.init(.review_request, payload);
+                            const sender_data = sender_packet.serialize(self.allocator) catch return error.BadInput;
+                            self.send_to(lobby.members.items[lobby.host_idx], sender_data);
+                            self.allocator.free(sender_data);
+                        },
+                    }
                 }
+            }
+        },
+        .review_response => {
+            const review_response = lib.deserialize_payload(packet.payload, ReviewResponsePayload) catch return error.BadInput;
+
+            const join_payload = review_response.q;
+            const dupe_scope = join_payload.scope[0..join_payload.scope.len];
+            const dupe_key = join_payload.key[0..join_payload.key.len];
+
+            switch (review_response.result) {
+                .Accepted => {
+                    const scope_exist = self.ctx.scopes.getPtr(dupe_scope);
+                    if (scope_exist) |scope| {
+                        const lobby_exist: ?*Lobby = scope.lobbies.getPtr(dupe_key);
+                        if (lobby_exist) |lobby| {
+                            const requester = lib.network.EndPoint{ .address = .{ .ipv4 = .{ .value = review_response.join_request.ip } }, .port = review_response.join_request.port };
+                            // authorize?
+                            try lobby.members.append(self.allocator, requester);
+                            std.log.info("{any} accepted {any}'s request", .{ sender, review_response.join_request });
+                        }
+                    }
+                },
+                .Rejected => std.log.info("{any} rejected {any}'s request", .{ sender, review_response.join_request }),
+                .Pending => return,
             }
         },
         .close => {
@@ -175,7 +186,9 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
 
             const scope_exist = self.ctx.scopes.getPtr(dupe_scope);
             if (scope_exist) |scope| {
-                // should check that the sender is the owner i.e is equal to members[0]
+                // lose check. could potentially arbitrarily fail
+                //if (lobby.members.items[lobby.host_idx].port == sender.port) return;
+
                 var entry_exist = scope.lobbies.fetchRemove(dupe_key);
                 if (entry_exist) |*entry| {
                     var lobby: Lobby = entry.value;
@@ -210,6 +223,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                         .users = @intCast(lobby.members.items.len),
                         .capacity = 4, // TODO
                         .ip = host.address.ipv4.value,
+                        .policy = lobby.join_policy,
                     }, .big) catch return error.BadInput;
                 }
 
@@ -235,6 +249,7 @@ pub fn main() !void {
     var state = State.init(allocator);
     var server = try lib.Server(State).init(PORT, allocator, &state);
     defer server.deinit();
+    defer state.deinit();
 
     server.set_read_timeout(1000);
 
@@ -545,8 +560,9 @@ test "request lobby list" {
         const host = try lib.deserialize_payload(payload_start[i * payload_individual_size .. (i + 1) * payload_individual_size], HostListPayload);
         //                                                      they come in reversed order
         //                                                      last in first out, i think
-        //                  although this is not consistent with > 2 lobbies so idk the best way to do this
         // try std.testing.expectEqualStrings(&host.name, &to_fixed(lobbies[lobbies.len - 1 - i], 32));
+        //                                                  although this is not consistent with > 2 lobbies so idk the best way to do this
+        try std.testing.expectEqual(JoinPolicy.AutoAccept, host.policy);
         try std.testing.expectEqual(1, host.users);
     }
 

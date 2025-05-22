@@ -21,9 +21,12 @@ const HostListPayload = shared.HostListPayload;
 const PORT = shared.PORT;
 const to_fixed = shared.to_fixed;
 
-const StateEnum = enum {
-    Mediating,
-    PeerToPeerEstablished,
+const localhost = false;
+
+const StateEnum = union(enum) {
+    Mediating: void,
+    PeerToPeerEstablished: void,
+    ReviewRequest: ReviewResponsePayload,
 };
 
 const State = struct {
@@ -87,35 +90,27 @@ fn handle_packet(self: *Client, data: []const u8, sender: lib.network.EndPoint) 
                     self.send(ack_data);
                     self.allocator.free(ack_data);
                 },
-                else => {
-                    //TODO
+                .ManualReview => {
+                    self.ctx.state = .{ .ReviewRequest = review_request };
+                    std.log.info("got a request to join from {any}", .{review_request.join_request});
+                    std.log.info("type 'yes' or 'no' to respond", .{});
                 },
+                else => {},
             }
         },
         .ack => {
-            self.target = sender;
             if (self.ctx.state != .PeerToPeerEstablished) {
+                self.target = sender;
                 // We send one additional round-trip as the first packet is presumed to be lost to punching a hole in the NAT
                 self.ctx.state = .PeerToPeerEstablished;
-                std.log.info("connected through peer-to-peer with {d}.{d}.{d}.{d}:{d}", .{
-                    sender.address.ipv4.value[0],
-                    sender.address.ipv4.value[1],
-                    sender.address.ipv4.value[2],
-                    sender.address.ipv4.value[3],
-                    sender.port,
-                });
+                std.log.info("connected through peer-to-peer with {any}", .{sender});
                 self.send(data);
             }
         },
         .message => {
-            std.log.info("{d}.{d}.{d}.{d}:{d}: {s}", .{
-                sender.address.ipv4.value[0],
-                sender.address.ipv4.value[1],
-                sender.address.ipv4.value[2],
-                sender.address.ipv4.value[3],
-                sender.port,
-                packet.payload,
-            });
+            if (self.ctx.state == .PeerToPeerEstablished) {
+                std.log.info("{any}: {s}", .{ sender, packet.payload });
+            }
         },
         else => return error.BadInput,
     }
@@ -133,6 +128,15 @@ const Commands = enum {
     Close,
     c,
     Help,
+};
+
+const ReviewOptions = enum {
+    Y,
+    y,
+    yes,
+    N,
+    n,
+    no,
 };
 
 fn handle_stdin(self: *Client) void {
@@ -157,6 +161,43 @@ fn handle_stdin(self: *Client) void {
             self.send(message);
             self.allocator.free(message);
         },
+        .ReviewRequest => |review| {
+            if (std.meta.stringToEnum(ReviewOptions, data)) |response| {
+                var packet_buffer: [512]u8 = undefined;
+                var review_copy = review;
+                switch (response) {
+                    .yes, .y, .Y => {
+                        review_copy.result = .Accepted;
+                        self.ctx.state = .PeerToPeerEstablished;
+                    },
+                    .no, .n, .N => {
+                        review_copy.result = .Rejected;
+                        self.ctx.state = .Mediating;
+                    },
+                }
+
+                const payload = lib.serialize_payload(&packet_buffer, review_copy) catch unreachable;
+                const packet = Packet.init(.review_response, payload) catch unreachable;
+                const message = packet.serialize(self.allocator) catch unreachable;
+                self.send(message);
+                self.allocator.free(message);
+
+                switch (response) {
+                    .yes, .y, .Y => {
+                        const nat_punch_packet = Packet.init(.ack, "hey") catch unreachable;
+                        const nat_punch_data = nat_punch_packet.serialize(self.allocator) catch unreachable;
+                        self.target = .{ .address = .{ .ipv4 = .{ .value = review.join_request.ip } }, .port = review.join_request.port };
+                        self.send(nat_punch_data);
+                        self.allocator.free(nat_punch_data);
+                        std.log.info("accepted request", .{});
+                        std.log.info("connected through peer-to-peer with {any}", .{review.join_request});
+                    },
+                    else => {},
+                }
+            } else {
+                std.log.err("Type 'yes' or 'no' to accept request", .{});
+            }
+        },
     }
 }
 
@@ -169,7 +210,10 @@ fn handle_command(self: *Client, cmd: Commands, arguments: []const u8) !void {
                 std.log.err("argument for HOST must be between 1<32. got {d}", .{arguments.len});
                 return;
             }
-            const packet = try Packet.init(.host, try lib.serialize_payload(&packet_buffer, HostPayload{ .scope = self.ctx.scope, .key = to_fixed(arguments, 32) }));
+            const packet = try Packet.init(.host, try lib.serialize_payload(&packet_buffer, HostPayload{
+                .q = .{ .scope = self.ctx.scope, .key = to_fixed(arguments, 32) },
+                .policy = self.ctx.policy,
+            }));
             const data = try packet.serialize(self.allocator);
             self.send(data);
             self.allocator.free(data);
@@ -180,7 +224,7 @@ fn handle_command(self: *Client, cmd: Commands, arguments: []const u8) !void {
                 std.log.err("argument for JOIN must be a valid integer. got {s}", .{arguments});
                 return;
             };
-            if (arguments.len < 1 or arguments.len > self.ctx.lobbies.items.len) {
+            if (lobby_idx < 1 or lobby_idx > self.ctx.lobbies.items.len) {
                 std.log.err("argument for HOST must be between 1<{d}. got {d}", .{ self.ctx.lobbies.items.len, arguments.len });
                 return;
             }
@@ -198,12 +242,21 @@ fn handle_command(self: *Client, cmd: Commands, arguments: []const u8) !void {
             }
 
             switch (lobby.policy) {
-                .AutoAccept, .ManualReview => {
+                .AutoAccept => {
                     const nat_punch_packet = try Packet.init(.ack, "hey");
                     const nat_punch_data = try nat_punch_packet.serialize(self.allocator);
                     self.target = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
                     self.send(nat_punch_data);
                     self.allocator.free(nat_punch_data);
+                },
+                .ManualReview => {
+                    if (!localhost) {
+                        const nat_punch_packet = try Packet.init(.ack, "hey");
+                        const nat_punch_data = try nat_punch_packet.serialize(self.allocator);
+                        self.target = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
+                        self.send(nat_punch_data);
+                        self.allocator.free(nat_punch_data);
+                    }
                 },
                 .Reject => {},
             }

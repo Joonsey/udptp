@@ -47,6 +47,17 @@ pub const JoinRequestPayload = extern struct {
     ip: [4]u8,
     port: u16,
 
+    pub fn format(
+        self: @This(),
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{}.{}.{}.{}:{}", .{ self.ip[0], self.ip[1], self.ip[2], self.ip[3], self.port });
+    }
+
     // id: [32]u8, // some user identifier, of arbitrary kind
 };
 

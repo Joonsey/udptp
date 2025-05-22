@@ -26,16 +26,19 @@ const JoinPayload = extern struct {
     key: [32]u8,
 };
 
-fn init_array32(str: []const u8) [32]u8 {
-    if (str.len > 32) @panic("string too long");
-    var buf: [32]u8 = undefined;
-    for (str, 0..) |c, i| {
-        buf[i] = c;
-    }
-    for (str.len..32) |i| {
-        buf[i] = 0;
-    }
+fn to_fixed(str: []const u8, comptime arr_len: usize) [arr_len]u8 {
+    std.debug.assert(str.len <= arr_len);
+    var buf: [arr_len]u8 = std.mem.zeroes([arr_len]u8);
+    @memcpy(buf[0..str.len], str);
     return buf;
+}
+
+test "static string converter" {
+    const str = "hello, world!";
+    const static_str = to_fixed(str, 15);
+
+    try std.testing.expectEqualSlices(u8, str, static_str[0..str.len]);
+    try std.testing.expectEqualStrings(str, static_str[0..str.len]);
 }
 
 const HostPayload = JoinPayload;
@@ -232,7 +235,7 @@ test "simple connection" {
     var ctx: TestContext = .{};
     var client = try lib.Client(TestContext).init(allocator, &ctx);
 
-    const host_payload: HostPayload = .{ .key = init_array32("hello"), .scope = init_array32("world") };
+    const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
     try stream.writer().writeStructEndian(host_payload, .big);
     const ack_packet = try Packet.init(.host, stream.getWritten());
     const data = try ack_packet.serialize(allocator);
@@ -244,7 +247,7 @@ test "simple connection" {
     try std.testing.expect(client.target != null);
     try std.testing.expectEqual(1, server.clients.size);
 
-    const found_scope = state.scopes.get(&init_array32("world"));
+    const found_scope = state.scopes.get(&to_fixed("world", 32));
     if (found_scope) |scope| {
         try std.testing.expectEqual(scope.lobbies.size, 1);
     } else {
@@ -269,7 +272,7 @@ test "join lobby" {
     var ctx: TestContext = .{};
     var client = try lib.Client(TestContext).init(allocator, &ctx);
 
-    const host_payload: HostPayload = .{ .key = init_array32("hello"), .scope = init_array32("world") };
+    const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
     const host_packet = try Packet.init(.host, try lib.serialize_payload(&buffer, host_payload));
     const host_data = try host_packet.serialize(allocator);
     try client.connect("127.0.0.1", 2800, host_data);
@@ -277,7 +280,7 @@ test "join lobby" {
     defer allocator.free(host_data);
 
     var join_client = try lib.Client(TestContext).init(allocator, &ctx);
-    const join_payload: JoinPayload = .{ .key = init_array32("hello"), .scope = init_array32("world") };
+    const join_payload: JoinPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) };
     const join_packet = try Packet.init(.join, try lib.serialize_payload(&buffer, join_payload));
     const join_data = try join_packet.serialize(allocator);
     try join_client.connect("127.0.0.1", 2800, join_data);
@@ -290,8 +293,8 @@ test "join lobby" {
     try std.testing.expect(client.target != null);
     try std.testing.expectEqual(2, server.clients.size);
 
-    const scope = state.scopes.get(&init_array32("world")).?;
-    const lobby: Lobby = scope.lobbies.get(&init_array32("hello")).?;
+    const scope = state.scopes.get(&to_fixed("world", 32)).?;
+    const lobby: Lobby = scope.lobbies.get(&to_fixed("hello", 32)).?;
 
     try std.testing.expectEqual(2, lobby.members.items.len);
 }
@@ -316,7 +319,7 @@ test "join lobby multiple scopes" {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
 
-        const host_payload: HostPayload = .{ .key = init_array32("hello"), .scope = init_array32(scope) };
+        const host_payload: HostPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed(scope, 32) };
         try stream.writer().writeStructEndian(host_payload, .big);
         const host_packet = try Packet.init(.host, stream.getWritten());
         const host_data = try host_packet.serialize(allocator);
@@ -328,7 +331,7 @@ test "join lobby multiple scopes" {
         stream = std.io.fixedBufferStream(&buffer);
         stream.reset();
         var join_client = try lib.Client(TestContext).init(allocator, &ctx);
-        const join_payload: JoinPayload = .{ .key = init_array32("hello"), .scope = init_array32(scope) };
+        const join_payload: JoinPayload = .{ .key = to_fixed("hello", 32), .scope = to_fixed(scope, 32) };
         try stream.writer().writeStructEndian(join_payload, .big);
         const join_packet = try Packet.init(.join, stream.getWritten());
         const join_data = try join_packet.serialize(allocator);
@@ -343,8 +346,8 @@ test "join lobby multiple scopes" {
     try std.testing.expectEqual(4, server.clients.size);
 
     inline for (scopes) |scope_name| {
-        const scope = state.scopes.get(&init_array32(scope_name)).?;
-        const lobby: Lobby = scope.lobbies.get(&init_array32("hello")).?;
+        const scope = state.scopes.get(&to_fixed(scope_name, 32)).?;
+        const lobby: Lobby = scope.lobbies.get(&to_fixed("hello", 32)).?;
 
         try std.testing.expectEqual(2, lobby.members.items.len);
     }
@@ -370,7 +373,7 @@ test "join lobby multiple lobbies" {
         var buffer: [512]u8 = undefined;
         var stream = std.io.fixedBufferStream(&buffer);
 
-        const host_payload: HostPayload = .{ .key = init_array32(lobby), .scope = init_array32("world") };
+        const host_payload: HostPayload = .{ .key = to_fixed(lobby, 32), .scope = to_fixed("world", 32) };
         try stream.writer().writeStructEndian(host_payload, .big);
         const host_packet = try Packet.init(.host, stream.getWritten());
         const host_data = try host_packet.serialize(allocator);
@@ -382,7 +385,7 @@ test "join lobby multiple lobbies" {
         stream = std.io.fixedBufferStream(&buffer);
         stream.reset();
         var join_client = try lib.Client(TestContext).init(allocator, &ctx);
-        const join_payload: JoinPayload = .{ .key = init_array32(lobby), .scope = init_array32("world") };
+        const join_payload: JoinPayload = .{ .key = to_fixed(lobby, 32), .scope = to_fixed("world", 32) };
         try stream.writer().writeStructEndian(join_payload, .big);
         const join_packet = try Packet.init(.join, stream.getWritten());
         const join_data = try join_packet.serialize(allocator);
@@ -397,8 +400,8 @@ test "join lobby multiple lobbies" {
     try std.testing.expectEqual(4, server.clients.size);
 
     inline for (lobbies) |lobby_name| {
-        const scope = state.scopes.get(&init_array32("world")).?;
-        const lobby: Lobby = scope.lobbies.get(&init_array32(lobby_name)).?;
+        const scope = state.scopes.get(&to_fixed("world", 32)).?;
+        const lobby: Lobby = scope.lobbies.get(&to_fixed(lobby_name, 32)).?;
 
         try std.testing.expectEqual(2, lobby.members.items.len);
     }

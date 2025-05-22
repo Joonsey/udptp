@@ -1,7 +1,7 @@
 const std = @import("std");
 const lib = @import("udptp_lib");
 
-pub const PORT = 3306;
+pub const PORT = 8469;
 
 pub const PacketType = enum(u32) {
     host,

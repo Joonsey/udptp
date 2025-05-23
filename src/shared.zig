@@ -1,3 +1,8 @@
+//! shared variables between main.zig - the mediation server
+//! and test_client.zig - the demonstration client
+//!
+//! all of the Payload types in this file 'should' be thoroughly documented
+//! as they should be compatible with all other languages via basic bytecode serialization
 const std = @import("std");
 const lib = @import("udptp_lib");
 
@@ -12,13 +17,13 @@ pub const PacketType = enum(u32) {
     req_host_list,
     ret_host_list,
 
-    //inter-client specific types
+    // inter-client specific values
     ack,
     message,
     keepalive,
 };
 
-pub const Packet = lib.Packet(.{ .T = PacketType });
+pub const Packet = lib.Packet(.{ .T = PacketType, .magic_bytes = 0x13800818 });
 
 pub const CloseReason = enum(u8) {
     HOST_QUIT,

@@ -1,5 +1,13 @@
 //! A sample test client for demonstration & testing purposes
 //! is not included in primary server build binary
+//!
+//! let it be known it is extremely incomplete. But it serves it's function
+//! as a demonstration for how one could set up a simple, direct peer-to-peer client.
+//!
+//! List of features it does NOT include (as of now):
+//!     - keeping track off if peer has disconnected
+//!     - proper closing (just let's TIMEOUT handle it)
+//!     - really treat all different cases
 
 const std = @import("std");
 const lib = @import("udptp_lib");
@@ -21,7 +29,8 @@ const HostListPayload = shared.HostListPayload;
 const PORT = shared.PORT;
 const to_fixed = shared.to_fixed;
 
-const localhost = false;
+const IP = "127.0.0.1";
+const localhost = std.mem.eql(u8, IP, "127.0.0.1");
 
 const StateEnum = union(enum) {
     Mediating: void,
@@ -31,11 +40,19 @@ const StateEnum = union(enum) {
 
 const State = struct {
     should_stop: bool = false,
+
+    /// the scope of the client. I.E what 'application' we are looking for
     scope: [32]u8,
-    policy: JoinPolicy = .AutoAccept,
+    policy: JoinPolicy = .ManualReview,
     state: StateEnum = .Mediating,
 
+    /// the other peer who we are connecting to
+    /// not to be confused with client.target which is in THIS PARTICULAR IMPLEMENTATION
+    /// always going to be the mediation server.
+    peer: ?lib.network.EndPoint = null,
+
     allocator: std.mem.Allocator,
+    /// list of lobbies synced from the mediation server
     lobbies: std.ArrayListUnmanaged(HostListPayload) = .{},
 
     const Self = @This();
@@ -49,12 +66,12 @@ const State = struct {
 
 const Client = lib.Client(State);
 
+/// this sample function is really all that is needed to get started handling the standard information from the mediation server
 fn handle_packet(self: *Client, data: []const u8, sender: lib.network.EndPoint) !void {
     var state = self.ctx;
     var packet = Packet.deserialize(data, self.allocator) catch return error.BadInput;
     defer packet.free(self.allocator);
 
-    //var packet_buffer: [512]u8 = undefined;
     switch (packet.header.packet_type) {
         .ret_host_list => {
             const payload_individual_size = @sizeOf(HostListPayload);
@@ -83,11 +100,11 @@ fn handle_packet(self: *Client, data: []const u8, sender: lib.network.EndPoint) 
             const review_request = try lib.deserialize_payload(packet.payload, ReviewResponsePayload);
             switch (self.ctx.policy) {
                 .AutoAccept => {
-                    self.target = .{ .address = .{ .ipv4 = .{ .value = review_request.join_request.ip } }, .port = review_request.join_request.port };
+                    self.ctx.peer = .{ .address = .{ .ipv4 = .{ .value = review_request.join_request.ip } }, .port = review_request.join_request.port };
 
                     const ack_packet = try Packet.init(.ack, "hey");
                     const ack_data = try ack_packet.serialize(self.allocator);
-                    self.send(ack_data);
+                    self.sendto(self.ctx.peer.?, ack_data);
                     self.allocator.free(ack_data);
                 },
                 .ManualReview => {
@@ -100,11 +117,26 @@ fn handle_packet(self: *Client, data: []const u8, sender: lib.network.EndPoint) 
         },
         .ack => {
             if (self.ctx.state != .PeerToPeerEstablished) {
-                self.target = sender;
+                self.ctx.peer = sender;
                 // We send one additional round-trip as the first packet is presumed to be lost to punching a hole in the NAT
                 self.ctx.state = .PeerToPeerEstablished;
                 std.log.info("connected through peer-to-peer with {any}", .{sender});
-                self.send(data);
+                self.sendto(self.ctx.peer.?, data);
+            }
+        },
+        .close => {
+            const close = try lib.deserialize_payload(packet.payload, ClosePayload);
+            std.log.info("lobby ({s}:{s}) closed with reason! {any}", .{ close.q.scope, close.q.key, close.reason });
+
+            switch (close.reason) {
+                .HOST_QUIT => {
+                    self.ctx.state = .Mediating;
+                    self.target = .{
+                        .address = lib.network.Address.parse(IP) catch unreachable,
+                        .port = PORT,
+                    };
+                },
+                .TIMEOUT => {},
             }
         },
         .message => {
@@ -158,7 +190,7 @@ fn handle_stdin(self: *Client) void {
         .PeerToPeerEstablished => {
             const packet = Packet.init(.message, data) catch unreachable;
             const message = packet.serialize(self.allocator) catch unreachable;
-            self.send(message);
+            self.sendto(self.ctx.peer.?, message);
             self.allocator.free(message);
         },
         .ReviewRequest => |review| {
@@ -178,16 +210,16 @@ fn handle_stdin(self: *Client) void {
 
                 const payload = lib.serialize_payload(&packet_buffer, review_copy) catch unreachable;
                 const packet = Packet.init(.review_response, payload) catch unreachable;
-                const message = packet.serialize(self.allocator) catch unreachable;
-                self.send(message);
-                self.allocator.free(message);
+                const review_result_data = packet.serialize(self.allocator) catch unreachable;
+                self.send(review_result_data);
+                self.allocator.free(review_result_data);
 
                 switch (response) {
                     .yes, .y, .Y => {
                         const nat_punch_packet = Packet.init(.ack, "hey") catch unreachable;
                         const nat_punch_data = nat_punch_packet.serialize(self.allocator) catch unreachable;
-                        self.target = .{ .address = .{ .ipv4 = .{ .value = review.join_request.ip } }, .port = review.join_request.port };
-                        self.send(nat_punch_data);
+                        self.ctx.peer = .{ .address = .{ .ipv4 = .{ .value = review.join_request.ip } }, .port = review.join_request.port };
+                        self.sendto(self.ctx.peer.?, nat_punch_data);
                         self.allocator.free(nat_punch_data);
                         std.log.info("accepted request", .{});
                         std.log.info("connected through peer-to-peer with {any}", .{review.join_request});
@@ -245,16 +277,17 @@ fn handle_command(self: *Client, cmd: Commands, arguments: []const u8) !void {
                 .AutoAccept => {
                     const nat_punch_packet = try Packet.init(.ack, "hey");
                     const nat_punch_data = try nat_punch_packet.serialize(self.allocator);
-                    self.target = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
-                    self.send(nat_punch_data);
+                    self.ctx.peer = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
+                    self.sendto(self.ctx.peer.?, nat_punch_data);
                     self.allocator.free(nat_punch_data);
                 },
                 .ManualReview => {
+                    // we can skip this if we are localhost. As we don't actually need to punch through the NAT
                     if (!localhost) {
                         const nat_punch_packet = try Packet.init(.ack, "hey");
                         const nat_punch_data = try nat_punch_packet.serialize(self.allocator);
-                        self.target = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
-                        self.send(nat_punch_data);
+                        self.ctx.peer = .{ .address = .{ .ipv4 = .{ .value = lobby.ip } }, .port = lobby.port };
+                        self.sendto(self.ctx.peer.?, nat_punch_data);
                         self.allocator.free(nat_punch_data);
                     }
                 },
@@ -276,12 +309,21 @@ fn handle_command(self: *Client, cmd: Commands, arguments: []const u8) !void {
     }
 }
 
+fn keep_alive(client: *Client) !void {
+    const packet = try Packet.init(.keepalive, "peep");
+    const data = try packet.serialize(client.allocator);
+    client.send(data);
+    client.allocator.free(data);
+}
+
 fn listen_thread(client: *Client) !void {
-    while (!client.ctx.should_stop)
+    while (!client.ctx.should_stop) {
+        try keep_alive(client);
         client.listen() catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
+    }
 }
 
 pub fn main() !void {
@@ -297,7 +339,7 @@ pub fn main() !void {
     var buffer: [512]u8 = undefined;
     const packet = try Packet.init(.req_host_list, try lib.serialize_payload(&buffer, RequestHostListPayload{ .scope = state.scope }));
     const data = try packet.serialize(allocator);
-    try client.connect("127.0.0.1", PORT, data);
+    try client.connect(IP, PORT, data);
 
     std.log.info("client connecting... with scope {s}", .{state.scope});
     const thread = try std.Thread.spawn(.{ .allocator = allocator }, listen_thread, .{&client});

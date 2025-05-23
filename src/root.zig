@@ -140,15 +140,21 @@ pub fn Client(comptime T: type) type {
             self.socket.close();
         }
 
+        /// sets self.target and sends an initial request
         pub fn connect(self: *Self, addr: []const u8, port: u16, connect_data: []const u8) !void {
             self.target = .{ .address = try network.Address.parse(addr), .port = port };
             self.send(connect_data);
         }
 
+        /// sends to arbitrary desired destination
+        pub fn sendto(self: *Self, target: network.EndPoint, data: []const u8) void {
+            _ = self.socket.sendTo(target, data) catch std.log.err("error sending data!", .{});
+        }
+
+        /// sends to self.target
         pub fn send(self: *Self, data: []const u8) void {
-            const socket = self.socket;
             if (self.target) |target| {
-                _ = socket.sendTo(target, data) catch std.log.err("error sending data!", .{});
+                self.sendto(target, data);
             }
         }
 

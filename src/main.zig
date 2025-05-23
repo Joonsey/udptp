@@ -27,7 +27,7 @@ const Lobby = struct {
     join_policy: JoinPolicy = .AutoAccept,
 
     fn deinit(self: *Lobby, allocator: std.mem.Allocator) void {
-        self.members.deinit(allocator);
+        self.members.clearAndFree(allocator);
     }
 };
 
@@ -54,6 +54,8 @@ const State = struct {
 
     allocator: std.mem.Allocator,
 
+    timeout_interval: i64 = std.time.us_per_s * 15,
+
     fn init(allocator: std.mem.Allocator) State {
         return .{
             .scopes = .{},
@@ -70,6 +72,56 @@ const State = struct {
         self.scopes.clearAndFree(self.allocator);
     }
 };
+
+pub fn cleanup_dead_clients(self: *lib.Server(State)) !void {
+    var iter = self.clients.iterator();
+    const now = std.time.microTimestamp();
+    while (iter.next()) |entry| {
+        const client = entry.key_ptr;
+        const timestamp = entry.value_ptr;
+        const delta = now - timestamp.*;
+
+        // client is considered timed-out
+        if (delta > self.ctx.timeout_interval) {
+            var scopes_iter = self.ctx.scopes.iterator();
+            while (scopes_iter.next()) |row| {
+                const scope_name = row.key_ptr.*;
+                const scope = row.value_ptr;
+
+                var lobby_iter = scope.lobbies.iterator();
+                while (lobby_iter.next()) |lobby_it| {
+                    const lobby: *Lobby = lobby_it.value_ptr;
+                    const key = lobby_it.key_ptr;
+                    const host: lib.network.EndPoint = lobby.members.items[lobby.host_idx];
+
+                    if (host.address.eql(client.address) and host.port == client.port) {
+                        var buffer: [512]u8 = undefined;
+                        const broadcast_packet = try Packet.init(.close, try lib.serialize_payload(&buffer, ClosePayload{ .q = .{ .key = to_fixed(key.*, 32), .scope = to_fixed(scope_name, 32) }, .reason = .TIMEOUT }));
+                        const packet_data = broadcast_packet.serialize(self.allocator) catch return error.BadInput;
+                        self.broadcast(lobby.members.items, packet_data);
+                        self.allocator.free(packet_data);
+
+                        // kinda stupid magic we gotta do here
+                        // to ensure no leaks
+                        var lobby_to_remove = scope.lobbies.fetchRemove(key.*);
+                        if (lobby_to_remove) |*l| {
+                            l.value.deinit(self.allocator);
+                            self.allocator.free(l.key);
+                        }
+                    } else {
+                        for (lobby.members.items, 0..) |member, i| {
+                            if (member.address.eql(client.address) and member.port == client.port) {
+                                _ = lobby.members.orderedRemove(i);
+                            }
+                        }
+                    }
+                }
+            }
+            std.log.debug("{any} timed out and got cleaned up", .{client});
+            _ = self.clients.fetchRemove(entry.key_ptr.*);
+        }
+    }
+}
 
 pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.network.EndPoint) lib.PacketError!void {
     var packet = Packet.deserialize(data, self.allocator) catch return error.BadInput;
@@ -94,7 +146,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
             if (scope_exist) |scope| {
                 const lobby_exist = scope.lobbies.getPtr(dupe_key);
                 if (lobby_exist) |_| {
-                    std.log.warn("lobby attempted to start with existing key / scope combination '{s}:{s}'", .{ dupe_scope, dupe_key });
+                    std.log.debug("lobby attempted to start with existing key / scope combination '{s}:{s}'", .{ dupe_scope, dupe_key });
 
                     self.allocator.free(dupe_scope);
                     self.allocator.free(dupe_key);
@@ -239,6 +291,7 @@ pub fn handle_packet(self: *lib.Server(State), data: []const u8, sender: lib.net
                 self.allocator.free(sender_data);
             }
         },
+        .keepalive => {},
         else => {
             return error.BadInput;
         },
@@ -260,6 +313,7 @@ pub fn main() !void {
 
     std.log.info("starting server!", .{});
     while (!state.should_stop) {
+        try cleanup_dead_clients(&server);
         server.listen() catch |err| switch (err) {
             error.WouldBlock => continue,
             else => std.log.err("An error occured!\n{!}", .{err}),
@@ -573,8 +627,38 @@ test "request lobby list" {
     thread.join();
 }
 
+test "simple timeout" {
+    const allocator = std.testing.allocator;
+
+    var state = State.init(allocator);
+    state.timeout_interval = std.time.us_per_ms * 50;
+    var server = try lib.Server(State).init(2802, allocator, &state);
+    server.set_read_timeout(200);
+    defer server.deinit();
+    defer state.deinit();
+    var buffer: [512]u8 = undefined;
+    server.handle_packet_cb = handle_packet;
+
+    const thread = try std.Thread.spawn(.{ .allocator = allocator }, _listen_wrapper, .{&server});
+
+    const TestContext = struct {};
+    var ctx: TestContext = .{};
+    var client = try lib.Client(TestContext).init(allocator, &ctx);
+
+    const packet = try Packet.init(.host, try lib.serialize_payload(&buffer, HostPayload{ .q = .{ .key = to_fixed("hello", 32), .scope = to_fixed("world", 32) } }));
+    const data = try packet.serialize(allocator);
+    try client.connect("127.0.0.1", 2802, data);
+    defer allocator.free(data);
+
+    std.Thread.sleep(std.time.ns_per_ms * 100);
+    state.should_stop = true;
+    thread.join();
+    try std.testing.expectEqual(0, server.clients.size);
+}
+
 fn _listen_wrapper(server_ptr: *lib.Server(State)) !void {
     while (!server_ptr.ctx.should_stop) {
+        try cleanup_dead_clients(server_ptr);
         _ = server_ptr.listen() catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,

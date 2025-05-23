@@ -15,12 +15,14 @@ pub const PacketType = enum(u32) {
     //inter-client specific types
     ack,
     message,
+    keepalive,
 };
 
 pub const Packet = lib.Packet(.{ .T = PacketType });
 
-pub const CloseReason = enum(u16) {
+pub const CloseReason = enum(u8) {
     HOST_QUIT,
+    TIMEOUT,
 };
 
 pub fn to_fixed(str: []const u8, comptime arr_len: usize) [arr_len]u8 {

@@ -1,5 +1,16 @@
 const std = @import("std");
 
+pub fn get_module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lib_mod.addImport("network", b.dependency("network", .{}).module("network"));
+
+    return lib_mod;
+}
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -18,16 +29,12 @@ pub fn build(b: *std.Build) void {
     // This creates a "module", which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Every executable or library we compile will be based on one or more modules.
-    const lib_mod = b.createModule(.{
-        // `root_source_file` is the Zig "entry point" of the module. If a module
-        // only contains e.g. external object files, you can make this `null`.
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lib_mod.addImport("network", b.dependency("network", .{}).module("network"));
+
+    // `root_source_file` is the Zig "entry point" of the module. If a module
+    // only contains e.g. external object files, you can make this `null`.
+    // In this case the main source file is merely a path, however, in more
+    // complicated build scripts, this could be a generated file.
+    const lib_mod = get_module(b, target, optimize);
 
     // We will also create a module for our other entry point, 'main.zig'.
     const exe_mod = b.createModule(.{

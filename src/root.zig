@@ -4,7 +4,7 @@
 const std = @import("std");
 const testing = std.testing;
 
-const CRC32 = std.hash.crc.Crc32Cksum;
+const CRC32 = std.hash.Crc32;
 
 pub const network = @import("network");
 
@@ -221,13 +221,13 @@ pub fn Packet(config: PacketConfig) type {
 
         /// caller is responsible for freeing after this is called
         pub fn serialize(self: *const Self, allocator: std.mem.Allocator) ![]const u8 {
-            const buffer = try allocator.alloc(u8, (self.header.header_size + self.header.payload_size) / @sizeOf(u8));
+            const buffer = try allocator.alloc(u8, self.header.header_size + self.header.payload_size);
             errdefer allocator.free(buffer);
             var stream = std.io.fixedBufferStream(buffer);
 
             const writer = stream.writer();
 
-            try writer.writeStruct(self.header);
+            try writer.writeStructEndian(self.header, .little);
             try writer.writeAll(self.payload);
             return stream.getWritten();
         }
@@ -237,7 +237,7 @@ pub fn Packet(config: PacketConfig) type {
             var stream = std.io.fixedBufferStream(data);
             const reader = stream.reader();
 
-            const header = try reader.readStruct(PacketHeaderType);
+            const header = try reader.readStructEndian(PacketHeaderType, .little);
             if (header.magic != config.magic_bytes) return error.InvalidMagicBytes;
 
             const payload = try allocator.alloc(u8, header.payload_size);

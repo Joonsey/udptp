@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub fn get_module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    const lib_mod = b.createModule(.{
+    const lib_mod = b.addModule("udptp", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,

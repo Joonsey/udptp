@@ -16,11 +16,11 @@ pub const PacketType = enum(u32) {
     close,
     req_host_list,
     ret_host_list,
+    keepalive,
 
     // inter-client specific values
     ack,
     message,
-    keepalive,
 };
 
 pub const Packet = lib.Packet(.{ .T = PacketType, .magic_bytes = 0x13800818 });

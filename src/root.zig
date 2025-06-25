@@ -263,7 +263,20 @@ pub fn serialize_payload(buffer: []u8, payload: anytype) ![]u8 {
     @memset(buffer, 0);
     var stream = std.io.fixedBufferStream(buffer);
 
-    try stream.writer().writeStructEndian(payload, .big);
+    const T = @TypeOf(payload);
+    const info = @typeInfo(T);
+    const writer = stream.writer();
+    switch (info) {
+        .@"struct" => try writer.writeStructEndian(payload, .big),
+        .pointer => |ptr_info| {
+            if (ptr_info.size == .slice) {
+                for (payload) |payload_struct| try writer.writeStructEndian(payload_struct, .big);
+            } else {
+                return error.InvalidType;
+            }
+        },
+        else => return error.InvalidType,
+    }
 
     return stream.getWritten();
 }
